@@ -1,0 +1,54 @@
+version: 2
+
+# Actions are pinned to the commit SHA (CYDA-17): a moving tag would let whoever
+# controls the action's repository choose what runs on the runner that
+# publishes to pub.dev. An unmaintained pin, though, ages silently and
+# falls behind on security patches too: here Dependabot opens the PR with the
+# new SHA and the updated `# vX.Y.Z` comment, and the verify.yml matrix
+# (analysis, tests, coverage, Android/iOS/web builds on the minimum and current Flutter)
+# decides whether that bump is healthy before the merge.
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: ci
+    groups:
+      # Minor and patch in a single PR: they are all verified with the same matrix.
+      # Majors stay separate PRs — they change runtime and defaults (Node 24,
+      # cmdline-tools) and must be read one by one.
+      github-actions-minor-patch:
+        patterns: ['*']
+        update-types: [minor, patch]
+
+  - package-ecosystem: pub
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+    groups:
+      # No `dependency-type` here: in groups it is only supported by bundler,
+      # composer, mix, maven, npm and pip — on `pub` it would be ignored.
+      pub-minor-patch:
+        patterns: ['*']
+        update-types: [minor, patch]
+    ignore:
+      # `meta` is pinned to an EXACT version by the Flutter SDK (1.17.0 on 3.38.1,
+      # 1.18.0 on 3.44.1): raising its constraint would make the package
+      # unresolvable on the declared minimum instead of more up to date.
+      - dependency-name: meta
+
+  - package-ecosystem: pub
+    directory: /example
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: chore

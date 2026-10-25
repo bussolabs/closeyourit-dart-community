@@ -1,0 +1,20 @@
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  language:
+    strict-casts: true
+    strict-inference: true
+    strict-raw-types: true
+  errors:
+    # Telemetry must never crash the host: no silently unhandled exceptions.
+    avoid_catches_without_on_clauses: ignore
+
+linter:
+  rules:
+    - prefer_final_locals
+    - prefer_const_constructors
+    - prefer_const_declarations
+    - unawaited_futures
+    - avoid_print
+    - always_declare_return_types
+    - prefer_single_quotes

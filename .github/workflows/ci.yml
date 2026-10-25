@@ -1,0 +1,65 @@
+# Public CI of bussolabs/closeyourit-dart-community (CYRA-914 B8). It runs on GitHub-hosted runners:
+# a fork's pull request must never reach the private pool. Releases are cut from the maintainer
+# repository, so this workflow only checks.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  analyze-test:
+    name: analyze-test (Flutter ${{ matrix.flutter }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # Minimum Flutter declared in pubspec.yaml and the stable pinned in mise.toml.
+        flutter: ['3.38.1', '3.44.1']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Isolate Pub configuration on Linux
+        if: ${{ runner.os == 'Linux' }}
+        run: sh tool/setup_ci_pub_config.sh
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: ${{ matrix.flutter }}
+          cache: true
+
+      - run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Test
+        run: flutter test
+
+  # The formatter changes style across Dart versions: it runs only on the stable pinned in mise.toml.
+  format:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Isolate Pub configuration on Linux
+        if: ${{ runner.os == 'Linux' }}
+        run: sh tool/setup_ci_pub_config.sh
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: 3.44.1
+          cache: true
+
+      - run: flutter pub get
+
+      - name: Format
+        run: dart format --output=none --set-exit-if-changed lib test

@@ -1,0 +1,16 @@
+[
+  { "id": "bearer-events", "channel": "events", "credential": "bearer", "endpoint": "/api/v1/projects/{project_id}/events", "status": 202 },
+  { "id": "bearer-logs", "channel": "logs", "credential": "bearer", "endpoint": "/api/v1/projects/{project_id}/logs", "status": 202 },
+  { "id": "bearer-metrics", "channel": "metrics", "credential": "bearer", "endpoint": "/api/v1/projects/{project_id}/metrics", "status": 202 },
+  { "id": "bearer-pageviews", "channel": "pageviews", "credential": "bearer", "endpoint": "/api/v1/projects/{project_id}/pageviews", "status": 202 },
+  { "id": "bearer-replays", "channel": "replays", "credential": "bearer", "endpoint": "/api/v1/projects/{project_id}/replays", "status": 202 },
+  { "id": "public-store", "channel": "events", "credential": "public_dsn", "endpoint": "/api/{project_id}/store", "status": 200 },
+  { "id": "public-envelope", "channel": "events", "credential": "public_dsn", "endpoint": "/api/{project_id}/envelope", "status": 200 },
+  { "id": "public-events", "channel": "events", "credential": "public_dsn", "endpoint": "/api/v1/projects/{project_id}/events", "status": 202 },
+  { "id": "public-logs", "channel": "logs", "credential": "public_dsn", "endpoint": "/api/v1/projects/{project_id}/logs", "status": 202 },
+  { "id": "public-metrics", "channel": "metrics", "credential": "public_dsn", "endpoint": "/api/v1/projects/{project_id}/metrics", "status": 202 },
+  { "id": "public-pageviews", "channel": "pageviews", "credential": "public_dsn", "endpoint": "/api/v1/projects/{project_id}/pageviews", "status": 202 },
+  { "id": "public-replays", "channel": "replays", "credential": "public_dsn", "endpoint": "/api/v1/projects/{project_id}/replays", "status": 202 },
+  { "id": "public-read-error-groups-rejected", "channel": "error_groups", "credential": "public_dsn", "endpoint": "/api/v1/error_groups", "status": 401 },
+  { "id": "public-read-log-entries-rejected", "channel": "log_entries", "credential": "public_dsn", "endpoint": "/api/v1/log_entries", "status": 401 }
+]

@@ -1,0 +1,21 @@
+name: closeyourit_example
+description: "Esempio d'uso del client CloseYourIt."
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.5.0 <4.0.0"
+  flutter: ">=3.38.1"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  closeyourit:
+    path: ../
+  dio: ^5.7.0
+
+dev_dependencies:
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
