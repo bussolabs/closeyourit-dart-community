@@ -499,7 +499,13 @@ class CloseYourItClient {
     final hook = options.beforeSend;
     Map<String, Object?> body = payload;
     if (hook != null) {
-      final scrubbed = hook(body);
+      final Map<String, Object?>? scrubbed;
+      try {
+        scrubbed = hook(body);
+      } catch (e) {
+        _recordHookError(e);
+        return;
+      }
       if (scrubbed == null) {
         stats.recordDrop(DropReason.beforeSend);
         return;
@@ -632,11 +638,23 @@ class CloseYourItClient {
     final hook = options.beforeSend;
     List<Map<String, Object?>> payloads = batch.map((e) => e.toJson()).toList();
     if (hook != null) {
-      final kept =
-          payloads.map(hook).whereType<Map<String, Object?>>().toList();
-      // Every log suppressed by the hook is a diagnosable drop (beforeSend).
-      for (var i = kept.length; i < payloads.length; i++) {
-        stats.recordDrop(DropReason.beforeSend);
+      // The hook runs log by log: a throw drops only that log, the rest of the
+      // batch is still sent (CYDA-30).
+      final kept = <Map<String, Object?>>[];
+      for (final payload in payloads) {
+        final Map<String, Object?>? scrubbed;
+        try {
+          scrubbed = hook(payload);
+        } catch (e) {
+          _recordHookError(e);
+          continue;
+        }
+        // Every log suppressed by the hook is a diagnosable drop (beforeSend).
+        if (scrubbed == null) {
+          stats.recordDrop(DropReason.beforeSend);
+          continue;
+        }
+        kept.add(scrubbed);
       }
       payloads = kept;
       if (payloads.isEmpty) return;
@@ -651,6 +669,17 @@ class CloseYourItClient {
         _recordRejectionReason(status);
       });
       if (accepted) stats.increment(StatKey.enqueued);
+    }
+  }
+
+  /// The `beforeSend` hook threw: the payload is dropped and counted, the error
+  /// never reaches the app. The debug warning carries no payload content and no
+  /// exception text (either may hold the very data the hook should scrub).
+  void _recordHookError(Object error) {
+    stats.recordDrop(DropReason.beforeSendError);
+    if (options.debug) {
+      debugPrint('[closeyourit] beforeSend hook threw '
+          '(${error.runtimeType}): payload dropped');
     }
   }
 

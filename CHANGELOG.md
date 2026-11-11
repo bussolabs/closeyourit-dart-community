@@ -5,6 +5,12 @@ versioni [SemVer](https://semver.org/lang/it/).
 
 ## [Unreleased]
 
+## [0.10.2] - 2026-11-10
+
+### Corretto
+
+- **Un `beforeSend` che lancia non rompe più l'app.** L'eccezione del filtro viene trattenuta: il dato che non è stato possibile filtrare è scartato e contato col nuovo motivo `DropReason.beforeSendError` (distinto da `beforeSend`), con un avviso in modalità debug che non riporta il contenuto. Vale per errori, messaggi, metriche e log: `measure` restituisce comunque il risultato dell'operazione, una chiamata Dio prosegue col suo errore originale e, in un gruppo di log, solo il log che fa fallire il filtro è scartato mentre gli altri partono.
+
 ## [0.10.1] - 2026-10-07
 
 ### Corretto

@@ -106,6 +106,35 @@ void main() {
       dispose();
     });
 
+    test(
+        'FlutterError.onError with a throwing beforeSend → no second error, '
+        'chain preserved', () async {
+      final h = _Harness(
+        options: CloseYourItOptions(
+          endpointUrl: 'https://www.closeyour.it',
+          token: 'cyi_t',
+          projectId: 'p1',
+          beforeSend: (_) => throw StateError('hook bug'),
+        ),
+      );
+      var prevCalled = false;
+      FlutterError.onError = (_) => prevCalled = true;
+
+      final dispose = installErrorHandlers(h.client);
+      FlutterError.onError!(
+        FlutterErrorDetails(
+          exception: StateError('boom'),
+          stack: StackTrace.current,
+        ),
+      );
+      await h.client.flush();
+
+      expect(prevCalled, isTrue);
+      expect(h.bodies, isEmpty);
+      expect(h.client.stats.drops(DropReason.beforeSendError), 1);
+      dispose();
+    });
+
     test('the disposer restores the previous handlers', () {
       final h = _Harness();
       final before = FlutterError.onError;
@@ -136,6 +165,34 @@ void main() {
       expect(h.uris.single.path, '/api/v1/projects/p1/events');
       final values = (h.bodies.single as Map)['exception'] as Map;
       expect((values['values'] as List), isNotEmpty);
+    });
+
+    test(
+        '5xx error with a throwing beforeSend → the original DioException '
+        'reaches the app, the event is dropped as beforeSendError', () async {
+      final h = _Harness(
+        options: CloseYourItOptions(
+          endpointUrl: 'https://www.closeyour.it',
+          token: 'cyi_t',
+          projectId: 'p1',
+          beforeSend: (_) => throw StateError('hook bug'),
+        ),
+      );
+      final dio = buildDio(
+        h,
+        _FakeAdapter((_) async => ResponseBody.fromString('{}', 500)),
+      );
+      Object? caught;
+      try {
+        await dio.get<dynamic>('https://api.x.it/orders');
+      } catch (e) {
+        caught = e;
+      }
+      await h.client.flush();
+      expect(caught, isA<DioException>());
+      expect((caught! as DioException).response?.statusCode, 500);
+      expect(h.bodies, isEmpty);
+      expect(h.client.stats.drops(DropReason.beforeSendError), 1);
     });
 
     test('4xx error → breadcrumb only, no event', () async {

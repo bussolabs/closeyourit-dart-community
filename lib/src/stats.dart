@@ -36,6 +36,11 @@ enum DropReason {
   /// Payload dropped by the `beforeSend` hook (`return null`).
   beforeSend(null),
 
+  /// Payload dropped because the `beforeSend` hook threw: the error is
+  /// swallowed (never surfaced to the app) and the payload is not sent.
+  /// Distinct from [beforeSend] so a faulty hook stays diagnosable (CYDA-30).
+  beforeSendError(null),
+
   /// Exception type in `excludedExceptions`: not sent.
   excluded(null),
 

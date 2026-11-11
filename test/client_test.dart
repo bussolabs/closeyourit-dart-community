@@ -494,6 +494,96 @@ void main() {
       await h.client.flush();
       expect(h.firstEvent['tagged'], true);
     });
+
+    Map<String, dynamic>? throwing(Map<String, dynamic> _) =>
+        throw StateError('hook bug');
+
+    test('throwing on captureException → swallowed, dropped and counted',
+        () async {
+      final h = _Harness(options(beforeSend: throwing));
+      expect(() => h.client.captureException(StateError('x')), returnsNormally);
+      await h.client.flush();
+      expect(h.bodies, isEmpty);
+      expect(h.client.stats.drops(DropReason.beforeSendError), 1);
+      expect(h.client.stats.drops(DropReason.beforeSend), 0);
+    });
+
+    test('throwing an Exception (not an Error) is swallowed too', () async {
+      Map<String, dynamic>? throwingException(Map<String, dynamic> _) =>
+          throw const FormatException('hook');
+
+      final h = _Harness(options(beforeSend: throwingException));
+      expect(() => h.client.captureException(StateError('x')), returnsNormally);
+      await h.client.flush();
+      expect(h.client.stats.drops(DropReason.beforeSendError), 1);
+    });
+
+    test('throwing on captureMessage → swallowed, dropped and counted',
+        () async {
+      final h = _Harness(options(beforeSend: throwing));
+      expect(() => h.client.captureMessage('hello'), returnsNormally);
+      await h.client.flush();
+      expect(h.bodies, isEmpty);
+      expect(h.client.stats.drops(DropReason.beforeSendError), 1);
+    });
+
+    test('throwing while measure records → the result is still returned',
+        () async {
+      final h = _Harness(options(beforeSend: throwing)); // threshold 0 → metric
+      final result = await h.client.measure('checkout', () async => 42);
+      await h.client.flush();
+      expect(result, 42);
+      expect(h.bodies, isEmpty);
+      expect(h.client.stats.drops(DropReason.beforeSendError), 1);
+    });
+
+    test('throwing only on the 2nd of 3 logs → 1st and 3rd sent, 2nd counted',
+        () async {
+      Map<String, dynamic>? throwOnB(Map<String, dynamic> p) {
+        if (p['message'] == 'b') throw StateError('hook bug');
+        return p;
+      }
+
+      final h = _Harness(options(beforeSend: throwOnB));
+      h.client
+        ..log(LogLevel.info, 'a')
+        ..log(LogLevel.info, 'b')
+        ..log(LogLevel.info, 'c');
+      await h.client.flush();
+      final batch = h.bodies.single as List;
+      expect(batch.map((e) => (e as Map)['message']), ['a', 'c']);
+      expect(h.client.stats.drops(DropReason.beforeSendError), 1);
+      expect(h.client.stats.drops(DropReason.beforeSend), 0);
+    });
+
+    test('throwing when a full log buffer flushes → log() does not throw',
+        () async {
+      final h = _Harness(options(beforeSend: throwing, logsBatchSize: 2));
+      expect(() => h.client.log(LogLevel.info, 'a'), returnsNormally);
+      // The 2nd log fills the buffer: the flush runs inside log().
+      expect(() => h.client.log(LogLevel.info, 'b'), returnsNormally);
+      await h.client.flush();
+      expect(h.bodies, isEmpty);
+      expect(h.client.stats.drops(DropReason.beforeSendError), 2);
+    });
+
+    test('a hook that modifies or drops without throwing → no beforeSendError',
+        () async {
+      Map<String, dynamic>? tagOrDrop(Map<String, dynamic> p) =>
+          p['message'] == 'drop' ? null : {...p, 't': 1};
+
+      final h = _Harness(options(beforeSend: tagOrDrop));
+      h.client
+        ..captureException(StateError('x'))
+        ..log(LogLevel.info, 'keep')
+        ..log(LogLevel.info, 'drop');
+      await h.client.flush();
+      expect(h.bodies.whereType<Map<String, dynamic>>().single['t'], 1);
+      final logs = h.bodies.whereType<List<dynamic>>().single;
+      expect(logs.map((e) => (e as Map)['message']), ['keep']);
+      expect(h.client.stats.drops(DropReason.beforeSend), 1);
+      expect(h.client.stats.drops(DropReason.beforeSendError), 0);
+    });
   });
 
   group('trace_id auto-population (correlation)', () {
