@@ -214,6 +214,7 @@ void main() {
 
       // Re-init: close(a) waits for the old client flush → the send fails and
       // the event stays in the store; the new client picks it up (replayPending).
+      // Without integrations (no UI) the replay still runs during init (CYDA-31).
       final spyB = _Spy();
       final b = _client(spyB, online: true, store: store);
       await CloseYourIt.init(_opts(), client: b, installIntegrations: false);

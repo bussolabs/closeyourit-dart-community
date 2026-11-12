@@ -116,6 +116,24 @@ class CloseYourItClient {
   /// offline, they survive and are resent at boot (see [replayPending]).
   final OfflineStore? _store;
 
+  /// Ids persisted by **this** session whose send was already handed to the
+  /// worker (CYDA-31). [replayPending] runs after the first frame, so it can
+  /// find on disk errors captured meanwhile: they are already in flight and
+  /// must not be sent twice. An id leaves the set once its record is off disk.
+  ///
+  /// Only needed until the replay has read the queue: after [replayPending]
+  /// (or [close]) it is emptied and no longer fed. Until then it keeps at most
+  /// [_maxTrackedIds] ids, oldest dropped first like the store evicts its
+  /// oldest records, so an offline session never grows it without bound.
+  final Set<String> _persistedThisSession = <String>{};
+
+  /// `true` once [replayPending] has read the queue: later ids need no tracking.
+  bool _replayDone = false;
+
+  /// Cap of [_persistedThisSession]: above the default store capacity (50),
+  /// so every id still on disk stays tracked.
+  static const int _maxTrackedIds = 256;
+
   /// `true` if offline persistence of errors is active.
   bool get hasOfflineStore => _store != null;
 
@@ -486,6 +504,8 @@ class CloseYourItClient {
   /// waits for sends, closes the transport.
   Future<void> close() async {
     _closed = true;
+    _replayDone = true;
+    _persistedThisSession.clear();
     _logBuffer.dispose();
     _jankCoalescer.flush();
     _usageRegistry?.dispose();
@@ -529,7 +549,10 @@ class CloseYourItClient {
       });
       // If the in-flight queue is saturated the event is NOT lost: it stays on disk
       // and replayPending resends it on the next start.
-      if (accepted) stats.increment(StatKey.enqueued);
+      if (accepted) {
+        _trackPersisted(id);
+        stats.increment(StatKey.enqueued);
+      }
       return;
     }
 
@@ -559,19 +582,40 @@ class CloseYourItClient {
   /// Picks up the events persisted by previous boots and re-enqueues them for
   /// sending. Every event is removed from disk on a 2xx confirmation **or** on a
   /// permanent rejection (see [_settlePersisted]); if offline again or on a
-  /// retryable outcome it stays, and is retried on the next boot. No-op without a store.
+  /// retryable outcome it stays, and is retried on the next boot. No-op without a store
+  /// or once the client is closed.
   ///
-  /// Must be called **once at startup**, after the transport init.
+  /// Must be called **once at startup**, after the transport init. The façade
+  /// defers it until the first frame (CYDA-31): errors persisted meanwhile by
+  /// this session are already in flight and are skipped (no double send).
   void replayPending() {
-    if (!options.isEnabled) return;
+    if (_closed || !options.isEnabled) return;
     final store = _store;
     if (store == null) return;
-    for (final event in store.readAll()) {
+    final pending = store.readAll();
+    // From here on the queue has been read: what this session persists later
+    // is never replayed by this client, so the ids stop being tracked.
+    final inFlight = Set<String>.of(_persistedThisSession);
+    _replayDone = true;
+    _persistedThisSession.clear();
+    for (final event in pending) {
+      if (inFlight.contains(event.id)) continue;
       final accepted = _worker.perform(() async {
         final status = await _transport.send(event.payload, uri: event.uri);
         _settlePersisted(store, event.id, status);
       });
       if (accepted) stats.increment(StatKey.replayed);
+    }
+  }
+
+  /// Remembers [id] as already in flight, until the replay has read the queue
+  /// (see [_persistedThisSession]).
+  void _trackPersisted(String id) {
+    if (_replayDone) return;
+    _persistedThisSession.add(id);
+    if (_persistedThisSession.length > _maxTrackedIds) {
+      // Insertion-ordered set: the first id is the oldest one.
+      _persistedThisSession.remove(_persistedThisSession.first);
     }
   }
 
@@ -588,7 +632,7 @@ class CloseYourItClient {
   ///   permanent one (tracked drop).
   void _settlePersisted(OfflineStore store, String id, int? status) {
     if (_isSuccess(status)) {
-      store.remove(id);
+      if (store.remove(id)) _persistedThisSession.remove(id);
       return;
     }
     if (_isRetryable(status)) {
@@ -596,6 +640,7 @@ class CloseYourItClient {
       // attempt cap is exhausted the store drops the record and reports it: then
       // count/log the drop, as for a permanent rejection.
       if (store.recordFailure(id)) {
+        _persistedThisSession.remove(id);
         // Attempts exhausted: dedicated reason (aggregates StatKey.discarded).
         stats.recordDrop(DropReason.maxAttempts);
         if (options.debug) {
@@ -609,6 +654,7 @@ class CloseYourItClient {
     // disk is confirmed: if [remove] fails (best-effort) the event stays and is
     // retried on the next boot, without inflating diagnostics with drops that never happened.
     if (!store.remove(id)) return;
+    _persistedThisSession.remove(id);
     // 413 = payload over the server-side budget (CYRA-112): dedicated reason; every
     // other permanent rejection is a generic permanentReject. Both aggregate
     // StatKey.discarded (historical semantics unchanged).

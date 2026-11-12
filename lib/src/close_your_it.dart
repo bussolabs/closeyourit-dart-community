@@ -135,8 +135,8 @@ abstract final class CloseYourIt {
     }
 
     // Picks up and sends the events persisted by previous boots (crash/offline):
-    // after the transport is ready, before starting the app.
-    instance.replayPending();
+    // after the transport is ready, but without delaying the app start (CYDA-31).
+    _scheduleReplay(instance, hasUi: installIntegrations);
 
     if (appRunner != null) {
       runZonedGuarded(
@@ -144,6 +144,46 @@ abstract final class CloseYourIt {
         (error, stack) => instance.captureException(error, stackTrace: stack),
       );
     }
+  }
+
+  /// Runs [CloseYourItClient.replayPending] once the app has shown its first
+  /// frame, so reading the leftover queue never delays the first screen
+  /// (CYDA-31). Without a UI — integrations off, binding not initialized, no
+  /// view (pure tests, headless) — or once the first frame is already on screen
+  /// (re-init), it runs right away as before. A client closed in the meantime
+  /// skips it ([CloseYourItClient.replayPending] is a no-op after close).
+  static void _scheduleReplay(CloseYourItClient instance,
+      {required bool hasUi}) {
+    if (hasUi) {
+      try {
+        final firstFrame = _firstFrameRasterized();
+        if (firstFrame != null) {
+          unawaited(firstFrame.then((_) {
+            try {
+              instance.replayPending();
+            } on Object {
+              // Telemetry never surfaces errors to the app.
+            }
+          }));
+          return;
+        }
+      } on Object {
+        // Binding not initialized (e.g. pure tests): replay right away.
+      }
+    }
+    instance.replayPending();
+  }
+
+  /// Future completing when the first frame is on screen, or `null` when there
+  /// is nothing to wait for (no view, or first frame already shown). Throws if
+  /// the binding is not initialized.
+  static Future<void>? _firstFrameRasterized() {
+    final binding = WidgetsBinding.instance;
+    if (binding.platformDispatcher.implicitView == null ||
+        binding.firstFrameRasterized) {
+      return null;
+    }
+    return binding.waitUntilFirstFrameRasterized;
   }
 
   static void _installLifecycle(CloseYourItClient instance) {

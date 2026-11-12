@@ -91,6 +91,48 @@ class _UnremovableStore implements OfflineStore {
   List<PendingEvent> readAll() => List.of(_events);
 }
 
+/// Unbounded in-memory store: every record stays due until it is removed and
+/// failures never drop it, so a replay sees everything the session persisted.
+class _KeepAllStore implements OfflineStore {
+  final Map<String, PendingEvent> _pending = <String, PendingEvent>{};
+
+  int get length => _pending.length;
+
+  @override
+  void add(String id,
+      {required Uri uri, required Map<String, Object?> payload}) {
+    _pending[id] = PendingEvent(id: id, uri: uri, payload: payload);
+  }
+
+  @override
+  bool remove(String id) {
+    _pending.remove(id);
+    return true;
+  }
+
+  @override
+  bool recordFailure(String id) => false; // never drops: due again
+
+  @override
+  List<PendingEvent> readAll() => List.of(_pending.values);
+}
+
+/// Offline client (every send fails) over [store], to count what a replay
+/// resends of the errors persisted by the same session.
+CloseYourItClient _offlineClient(OfflineStore store, Stats stats) =>
+    CloseYourItClient(
+      _options(),
+      transport: Transport(
+        token: 'cyi_t',
+        stats: stats,
+        client: MockClient((req) async => throw Exception('offline')),
+      ),
+      stats: stats,
+      // Room for every replayed record at once.
+      worker: BackgroundWorker(stats: stats, maxQueue: 500),
+      store: store,
+    );
+
 /// Writes a raw record (in the on-disk format) to control the retry state,
 /// age and endpoint in the queue end-to-end tests.
 void _writeRaw(
@@ -172,6 +214,90 @@ void main() {
       expect(boot2.bodies.single['event_id'],
           (persisted['payload'] as Map)['event_id']);
       expect(boot2.filesOnDisk, 0); // confirmed → removed from disk
+    });
+
+    test(
+        'deferred replay: an error captured before it is sent only once (CYDA-31)',
+        () async {
+      // Boot 1 — offline: one leftover error on disk.
+      final boot1 = _Harness(dir, online: false, clock: () => t0);
+      boot1.client.captureException(StateError('left over'));
+      await boot1.client.flush();
+      expect(boot1.filesOnDisk, 1);
+
+      // Boot 2 — the app captures an error before the (deferred) replay runs:
+      // its send is already in flight and its record is on disk, due now.
+      final boot2 = _Harness(dir,
+          online: true, clock: () => t0.add(const Duration(hours: 1)));
+      boot2.client.captureException(StateError('before first frame'));
+      expect(boot2.filesOnDisk, 2);
+      boot2.client.replayPending();
+      await boot2.client.flush();
+
+      // Only the leftover is replayed: the in-flight one is not sent twice.
+      expect(boot2.stats[StatKey.replayed], 1);
+      expect(boot2.bodies, hasLength(2));
+      final eventIds = boot2.bodies.map((b) => b['event_id']).toList();
+      expect(eventIds.toSet(), hasLength(2));
+      expect(boot2.filesOnDisk, 0); // both confirmed → removed from disk
+    });
+
+    test('replayPending after close sends nothing (CYDA-31)', () async {
+      final boot1 = _Harness(dir, online: false, clock: () => t0);
+      boot1.client.captureException(StateError('left over'));
+      await boot1.client.flush();
+
+      final boot2 = _Harness(dir,
+          online: true, clock: () => t0.add(const Duration(hours: 1)));
+      await boot2.client.close();
+      boot2.client.replayPending(); // e.g. first frame after a re-init
+
+      expect(boot2.stats[StatKey.replayed], 0);
+      expect(boot2.bodies, isEmpty);
+      expect(boot2.filesOnDisk, 1); // still on disk for the next start
+    });
+
+    test(
+        'in-flight ids are kept only until the replay reads the queue (CYDA-31)',
+        () async {
+      final stats = Stats();
+      final store = _KeepAllStore();
+      final client = _offlineClient(store, stats);
+
+      client.captureException(StateError('before the replay'));
+      await client.flush();
+      client.replayPending(); // skips the in-flight error
+      await client.flush();
+      expect(stats[StatKey.replayed], 0);
+
+      // After the replay nothing is remembered any more: a later error is not
+      // tracked and the earlier id was released (a second replay — never
+      // done by the façade — would see both as plain leftovers).
+      client.captureException(StateError('after the replay'));
+      await client.flush();
+      client.replayPending();
+      await client.flush();
+      expect(stats[StatKey.replayed], 2);
+      expect(store.length, 2);
+    });
+
+    test('in-flight ids stay bounded during a long offline session (CYDA-31)',
+        () async {
+      final stats = Stats();
+      final store = _KeepAllStore();
+      final client = _offlineClient(store, stats);
+
+      // 300 errors before the replay, far more than any real queue keeps.
+      for (var i = 0; i < 300; i++) {
+        client.captureException(StateError('offline $i'));
+        await client.flush();
+      }
+      client.replayPending();
+      await client.flush();
+
+      // At most 256 ids are remembered (the newest ones): only the 44 oldest,
+      // which a real store would have evicted long before, count as leftovers.
+      expect(stats[StatKey.replayed], 300 - 256);
     });
 
     test('online: the error is sent and removed from disk on 2xx', () async {

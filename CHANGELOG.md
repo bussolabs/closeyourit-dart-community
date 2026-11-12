@@ -5,6 +5,13 @@ versioni [SemVer](https://semver.org/lang/it/).
 
 ## [Unreleased]
 
+## [0.10.3] - 2026-11-11
+
+### Corretto
+
+- **Salvare un errore non rallenta più l'interfaccia con la coda offline piena.** La scrittura su disco resta immediata, ma per rispettare il tetto `maxPersistedEvents` non si aprono più gli altri errori in attesa: la coda tiene in memoria l'elenco dei suoi file e, quando è piena, scarta sempre il più vecchio.
+- **L'avvio non aspetta più gli errori rimasti dalla sessione precedente.** `init` li rispedisce subito dopo la prima schermata invece che prima di avviare l'app; senza interfaccia (`installIntegrations: false` o nessuna view) partono subito come prima. Gli errori catturati prima della prima schermata sono già in invio e non vengono rispediti due volte.
+
 ## [0.10.2] - 2026-11-10
 
 ### Corretto

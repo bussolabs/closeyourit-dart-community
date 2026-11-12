@@ -116,6 +116,98 @@ void main() {
       expect(ids, contains('e3'));
     });
 
+    test('full queue: add evicts the oldest without reading the other files',
+        () {
+      final drops = <DropReason>[];
+      final store = FileOfflineStore(dir, maxEvents: 3, onDrop: drops.add);
+      final now = DateTime.now().toUtc();
+      for (var i = 0; i < 3; i++) {
+        _writeRaw(dir, 'e$i', uri, {'n': i},
+            storedAt: now.subtract(Duration(minutes: 3 - i)));
+      }
+      // Unreadable content: had add decoded it, it would be dropped as corrupted.
+      final broken = File('${dir.path}/e1.json');
+      broken.writeAsStringSync('{ not json');
+      broken.setLastModifiedSync(now.subtract(const Duration(minutes: 2)));
+
+      store.add('e3', uri: uri, payload: {'n': 3});
+
+      expect(File('${dir.path}/e0.json').existsSync(), isFalse); // oldest
+      expect(File('${dir.path}/e1.json').existsSync(), isTrue); // not opened
+      expect(File('${dir.path}/e3.json').existsSync(), isTrue);
+      expect(drops, [DropReason.evicted]); // no storeCorrupted from add
+    });
+
+    test('add does not open or decode the other pending files (CYDA-31)', () {
+      final drops = <DropReason>[];
+      final store = FileOfflineStore(dir, onDrop: drops.add);
+      File('${dir.path}/broken.json').writeAsStringSync('{ not json');
+
+      // Several captures in a row: none of them reads the broken record.
+      for (var i = 0; i < 5; i++) {
+        store.add('id$i', uri: uri, payload: {'n': i});
+      }
+
+      expect(File('${dir.path}/broken.json').existsSync(), isTrue);
+      expect(drops, isEmpty);
+      // The full read at startup is still where corrupted records are dropped.
+      expect(store.readAll(), hasLength(5));
+      expect(drops, [DropReason.storeCorrupted]);
+    });
+
+    test('readAll realigns the eviction order with the real stored_at', () {
+      final store = FileOfflineStore(dir, maxEvents: 2);
+      final now = DateTime.now().toUtc();
+      _writeRaw(dir, 'old', uri, {'n': 1},
+          storedAt: now.subtract(const Duration(hours: 2)));
+      _writeRaw(dir, 'new', uri, {'n': 2},
+          storedAt: now.subtract(const Duration(hours: 1)));
+      // Rewritten after a failed attempt: the file looks newer than it is.
+      final aMinuteAgo = now.subtract(const Duration(minutes: 1));
+      File('${dir.path}/old.json').setLastModifiedSync(now);
+      File('${dir.path}/new.json').setLastModifiedSync(aMinuteAgo);
+
+      store.readAll(); // startup read: real stored_at replace the file times
+      store.add('latest', uri: uri, payload: {'n': 3});
+
+      final ids = store.readAll().map((e) => e.id).toList();
+      expect(ids, ['new', 'latest']); // the really oldest one was evicted
+    });
+
+    test('remove and dropped records free their slot in the index', () {
+      final drops = <DropReason>[];
+      final store = FileOfflineStore(dir,
+          maxEvents: 2,
+          retryPolicy: const OfflineRetryPolicy(maxAttempts: 1),
+          onDrop: drops.add);
+      store.add('a', uri: uri, payload: {'n': 1});
+      store.add('b', uri: uri, payload: {'n': 2});
+
+      expect(store.remove('a'), isTrue);
+      store.add('c', uri: uri, payload: {'n': 3}); // slot freed by remove
+      expect(store.recordFailure('b'), isTrue); // attempts exhausted → dropped
+      store.add('d', uri: uri, payload: {'n': 4}); // slot freed by the drop
+
+      expect(drops, isEmpty); // nothing evicted for capacity
+      expect(store.readAll().map((e) => e.id).toSet(), {'c', 'd'});
+    });
+
+    test('a file added from outside joins the index at the next full read', () {
+      final drops = <DropReason>[];
+      final store = FileOfflineStore(dir, maxEvents: 2, onDrop: drops.add);
+      final now = DateTime.now().toUtc();
+      store.add('a', uri: uri, payload: {'n': 1}); // index built here
+      _writeRaw(dir, 'outside', uri, {'n': 0},
+          storedAt: now.subtract(const Duration(hours: 1)));
+
+      store.readAll(); // realigns with the files actually present
+      store.add('b', uri: uri, payload: {'n': 2}); // at the cap → evicts
+
+      expect(drops, [DropReason.evicted]);
+      expect(File('${dir.path}/outside.json').existsSync(), isFalse);
+      expect(store.readAll().map((e) => e.id).toSet(), {'a', 'b'});
+    });
+
     test('corrupted file: skipped (and deleted), does not crash readAll', () {
       final store = FileOfflineStore(dir);
       File('${dir.path}/broken.json').writeAsStringSync('{ not json');
@@ -380,5 +472,9 @@ void _writeRaw(
     if (nextAttemptAt != null)
       'next_attempt_at': nextAttemptAt.toIso8601String(),
   };
-  File('${dir.path}/$id.json').writeAsStringSync(jsonEncode(record));
+  final file = File('${dir.path}/$id.json');
+  file.writeAsStringSync(jsonEncode(record));
+  // As if written at `stored_at`: the index built without reading the files
+  // relies on the modification time (CYDA-31).
+  file.setLastModifiedSync(storedAt);
 }

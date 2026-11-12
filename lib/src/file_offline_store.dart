@@ -67,6 +67,16 @@ class FileOfflineStore implements OfflineStore {
 
   static DateTime _defaultClock() => DateTime.now().toUtc();
 
+  /// In-memory index of the pending records: id → `stored_at` (CYDA-31).
+  ///
+  /// Lets [add] enforce [maxEvents] without opening and decoding every other
+  /// pending file on each capture (the cost that made a full queue janky).
+  /// Built lazily once from the directory listing and the files' modification
+  /// time (no read, no decode), then kept up to date by [add], [remove] and
+  /// [recordFailure]. Every full read ([readAll]) realigns it with the files
+  /// actually present and their real `stored_at`. `null` = not built yet.
+  Map<String, DateTime>? _index;
+
   /// Reports [reason] to the diagnostic sink (best-effort: never throws).
   void _reportDrop(DropReason reason) {
     final sink = _onDrop;
@@ -83,7 +93,8 @@ class FileOfflineStore implements OfflineStore {
       {required Uri uri, required Map<String, Object?> payload}) {
     try {
       _directory.createSync(recursive: true);
-      _evictIfNeeded();
+      final index = _ensureIndex();
+      _evictIfNeeded(index);
       final now = _clock();
       final record = <String, Object?>{
         'v': _schemaVersion,
@@ -100,6 +111,7 @@ class FileOfflineStore implements OfflineStore {
       // flush: true → the bytes reach the disk before returning (durability
       // even if the process dies right after).
       _fileFor(id).writeAsStringSync(jsonEncode(record), flush: true);
+      index[id] = now;
     } on Object {
       // Best-effort persistence: never throw (telemetry does not crash the host).
     }
@@ -110,6 +122,7 @@ class FileOfflineStore implements OfflineStore {
     try {
       final file = _fileFor(id);
       if (file.existsSync()) file.deleteSync();
+      _index?.remove(id);
       return true; // removed or already missing: no longer pending
     } on Object {
       return false; // best-effort failed: the record stays on disk
@@ -120,18 +133,24 @@ class FileOfflineStore implements OfflineStore {
   bool recordFailure(String id) {
     try {
       final file = _fileFor(id);
-      if (!file.existsSync()) return false; // nothing to reschedule/drop
+      if (!file.existsSync()) {
+        _index?.remove(id);
+        return false; // nothing to reschedule/drop
+      }
       final decoded = jsonDecode(file.readAsStringSync());
       if (decoded is! Map) {
         // unreadable record: do not retry it forever
-        if (_deleteQuietly(file)) _reportDrop(DropReason.storeCorrupted);
+        if (_deleteQuietly(file)) {
+          _index?.remove(id);
+          _reportDrop(DropReason.storeCorrupted);
+        }
         return false;
       }
       final attempt = _attemptOf(decoded) + 1;
       // Attempts exhausted: drop. Retrying beyond the cap does not make it
       // deliverable and would keep the queue busy forever.
       if (attempt >= _policy.maxAttempts) {
-        _deleteQuietly(file);
+        if (_deleteQuietly(file)) _index?.remove(id);
         return true;
       }
       // Reschedule with backoff: the next attempt is not due before
@@ -156,17 +175,26 @@ class FileOfflineStore implements OfflineStore {
       if (!_directory.existsSync()) return const [];
       final now = _clock();
       final due = <_Entry>[];
+      // Full read: realign the index with the files actually present and their
+      // real `stored_at` (replaces the modification times it was built from).
+      final index = <String, DateTime>{};
       for (final entry in _entries()) {
         // TTL: too old → drop (it will not become deliverable by retrying).
         if (now.difference(entry.storedAt) > _policy.ttl) {
-          if (_deleteQuietly(entry.file)) _reportDrop(DropReason.expired);
+          if (_deleteQuietly(entry.file)) {
+            _reportDrop(DropReason.expired);
+          } else {
+            index[entry.event.id] = entry.storedAt; // still on disk
+          }
           continue;
         }
+        index[entry.event.id] = entry.storedAt;
         // Backoff in progress: not due yet → skip, it stays on disk for a
         // later start (this is what avoids the burst on every start).
         if (entry.nextAttemptAt.isAfter(now)) continue;
         due.add(entry);
       }
+      _index = index;
       due.sort((a, b) => a.storedAt.compareTo(b.storedAt));
       return due.map((e) => e.event).toList();
     } on Object {
@@ -253,14 +281,40 @@ class FileOfflineStore implements OfflineStore {
     return int.tryParse('${raw ?? ''}') ?? 0;
   }
 
-  /// If at the cap, deletes the oldest records (by `stored_at`) to make room.
-  void _evictIfNeeded() {
-    final entries = _entries();
-    if (entries.length < maxEvents) return;
-    entries.sort((a, b) => a.storedAt.compareTo(b.storedAt));
-    final toRemove = entries.length - maxEvents + 1;
-    for (var i = 0; i < toRemove && i < entries.length; i++) {
-      if (_deleteQuietly(entries[i].file)) _reportDrop(DropReason.evicted);
+  /// Returns the in-memory index, building it on first use from the directory
+  /// listing and each file's modification time: no pending file is opened or
+  /// decoded. The next [readAll] replaces those times with the real `stored_at`.
+  Map<String, DateTime> _ensureIndex() {
+    final existing = _index;
+    if (existing != null) return existing;
+    final index = <String, DateTime>{};
+    for (final file in _pendingFiles()) {
+      try {
+        index[_idOf(file)] = file.lastModifiedSync().toUtc();
+      } on Object {
+        // Vanished meanwhile: the next full read realigns the index.
+      }
+    }
+    return _index = index;
+  }
+
+  /// If at the cap, deletes the oldest records (by `stored_at`) to make room,
+  /// looking only at the in-memory [index]: no other pending file is read.
+  void _evictIfNeeded(Map<String, DateTime> index) {
+    if (index.length < maxEvents) return;
+    // Oldest first; the id breaks ties so the choice is deterministic.
+    final oldest = index.entries.toList();
+    oldest.sort((a, b) {
+      final byDate = a.value.compareTo(b.value);
+      return byDate != 0 ? byDate : a.key.compareTo(b.key);
+    });
+    final toRemove = oldest.length - maxEvents + 1;
+    for (var i = 0; i < toRemove && i < oldest.length; i++) {
+      final id = oldest[i].key;
+      if (_deleteQuietly(_fileFor(id))) {
+        index.remove(id);
+        _reportDrop(DropReason.evicted);
+      }
     }
   }
 
