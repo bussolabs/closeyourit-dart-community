@@ -71,6 +71,70 @@ void main() {
     });
   });
 
+  group('Scrubber.scrubMap — values that contain themselves (CYDA-39)', () {
+    test('a map that contains itself: the reference becomes [Circular]', () {
+      final input = <String, Object?>{'name': 'a'};
+      input['self'] = input;
+      final out = Scrubber.scrubMap(input);
+      expect(out, {'name': 'a', 'self': '[Circular]'});
+    });
+
+    test('a list that contains itself: the reference becomes [Circular]', () {
+      final list = <Object?>[1];
+      list.add(list);
+      final out = Scrubber.scrubMap({'items': list});
+      expect(out['items'], [1, '[Circular]']);
+    });
+
+    test('a cycle across 2 maps: the second reference becomes [Circular]', () {
+      final a = <String, Object?>{'name': 'a'};
+      final b = <String, Object?>{'name': 'b', 'back': a};
+      a['next'] = b;
+      final out = Scrubber.scrubMap(a);
+      expect(out, {
+        'name': 'a',
+        'next': {'name': 'b', 'back': '[Circular]'},
+      });
+    });
+
+    test('a value repeated without a cycle is copied in full in each place',
+        () {
+      final shared = <String, Object?>{
+        'id': 7,
+        'tags': <Object?>['x'],
+      };
+      final out = Scrubber.scrubMap({
+        'first': shared,
+        'second': shared,
+        'list': <Object?>[shared, shared],
+      });
+      final full = {
+        'id': 7,
+        'tags': ['x'],
+      };
+      expect(out['first'], full);
+      expect(out['second'], full);
+      expect(out['list'], [full, full]);
+    });
+
+    test('sensitive values stay redacted inside a cyclic structure', () {
+      final input = <String, Object?>{'password': 'hunter2', 'id': 1};
+      input['self'] = input;
+      input['nested'] = <String, Object?>{'token': 'jwt', 'parent': input};
+      final out = Scrubber.scrubMap(input);
+      expect(out, {
+        'password': '[FILTERED]',
+        'id': 1,
+        'self': '[Circular]',
+        'nested': {'token': '[FILTERED]', 'parent': '[Circular]'},
+      });
+    });
+
+    test('the placeholder is exposed as Scrubber.circular', () {
+      expect(Scrubber.circular, '[Circular]');
+    });
+  });
+
   group('Scrubber.scrubMessage', () {
     test('redacts key=value assignments with a sensitive key', () {
       expect(Scrubber.scrubMessage('login failed password=hunter2'),

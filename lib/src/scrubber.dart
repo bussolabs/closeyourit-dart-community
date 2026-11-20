@@ -92,24 +92,52 @@ abstract final class Scrubber {
   /// Replacement value for redacted fields.
   static const String filtered = '[FILTERED]';
 
+  /// Replacement for a Map or List that contains itself, directly or through
+  /// other values (CYDA-39). Same marker as the JS and Python SDKs.
+  static const String circular = '[Circular]';
+
   /// Returns a deep copy of [input] with sensitive values redacted.
   ///
   /// A key matching [sensitiveKey] redacts the whole value
   /// (even if it is a map/list). Nested Maps and Lists are traversed.
-  static Map<String, Object?> scrubMap(Map<String, Object?> input) {
-    final result = <String, Object?>{};
-    input.forEach((key, value) {
-      result[key] = sensitiveKey.hasMatch(key) ? filtered : _scrubValue(value);
-    });
-    return result;
+  /// A Map or List already open on the current path becomes [circular]
+  /// instead of recursing forever; the same value repeated elsewhere,
+  /// without a cycle, is copied in full.
+  static Map<String, Object?> scrubMap(Map<String, Object?> input) =>
+      _scrubMap(input, Set<Object>.identity());
+
+  /// [open] holds the **original** Maps and Lists on the current path, by
+  /// identity: the copies made while scrubbing are never the ones that loop.
+  static Map<String, Object?> _scrubMap(
+    Map<Object?, Object?> input,
+    Set<Object> open,
+  ) {
+    open.add(input);
+    try {
+      final result = <String, Object?>{};
+      input.forEach((key, value) {
+        final name = key.toString();
+        result[name] =
+            sensitiveKey.hasMatch(name) ? filtered : _scrubValue(value, open);
+      });
+      return result;
+    } finally {
+      open.remove(input);
+    }
   }
 
-  static Object? _scrubValue(Object? value) {
-    if (value is Map) {
-      return scrubMap(value.map((k, v) => MapEntry(k.toString(), v)));
+  static Object? _scrubValue(Object? value, Set<Object> open) {
+    if (value is Map || value is List) {
+      if (open.contains(value)) return circular;
     }
+    if (value is Map) return _scrubMap(value, open);
     if (value is List) {
-      return value.map(_scrubValue).toList();
+      open.add(value);
+      try {
+        return value.map((item) => _scrubValue(item, open)).toList();
+      } finally {
+        open.remove(value);
+      }
     }
     return value;
   }

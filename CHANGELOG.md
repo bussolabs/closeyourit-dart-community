@@ -5,6 +5,12 @@ versioni [SemVer](https://semver.org/lang/it/).
 
 ## [Unreleased]
 
+## [0.10.4] - 2026-11-12
+
+### Corretto
+
+- **Un dato che contiene se stesso non manda più in errore la libreria.** Una mappa o un elenco che rimanda a se stesso, direttamente o tramite altri dati, nel contesto, nella cronologia o nei log viene inviato con il segnaposto `[Circular]` al posto del rimando, invece di bloccare la segnalazione. Un dato solo ripetuto in più punti arriva per intero, e i valori sensibili restano nascosti.
+
 ## [0.10.3] - 2026-11-11
 
 ### Corretto
